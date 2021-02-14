@@ -44,21 +44,22 @@ class MyModel(nn.Module):
         '''
         if task == 'train':
             
-            inputs, input_types, labels = batch
-            bert_mask = torch.ne(inputs, 0) # 找到 inputs 中不等于 0 的地方，置为 1（0表示padding）
+            inputs, input_types, labels = batch #inputs: (batch_size, sqe_len)
+            bert_mask = torch.ne(inputs, 0) # 找到 inputs 中不等于 0 的地方，置为 1（0表示padding）  #bert_mask:(batch_size, sqe_len)
             
             
             if self.after_bert_choice != "last_four_cls":
-                # bert_enc：词向量   pooled_out：句向量
+                # bert_enc：词向量 num_hidden_layer 个 (batch_size, sqe_len,hidden_size)  pooled_out：句向量 (batch_size, hidden_size)
                 bert_enc, pooled_out = self.bert(inputs, token_type_ids=input_types, attention_mask=bert_mask, output_all_encoded_layers=False) 
                 if self.after_bert_choice == "mean_pooling":
                 
                     ##### 3.10 大 bug 修复：取 mean 之前，应该先把 padding 部分的特征去除！！！
-                    mask_2 = bert_mask # 其余等于 1 的部分，即有效的部分                
-                    mask_2_expand = mask_2.unsqueeze_(-1).expand(bert_enc.size()).float()
-                    sum_mask = mask_2_expand.sum(dim=1) # 有效的部分“长度”求和
+                    mask_2 = bert_mask # 其余等于 1 的部分，即有效的部分  (batch_size, sqe_len)               
+                    mask_2_expand = mask_2.unsqueeze_(-1).expand(bert_enc.size()).float()  # mask_2.unsqueeze_(-1) :batch_size,seq_len,hidden_size=1
+                    #mask_2_expand : batch_size,seq_len,hidden_size
+                    sum_mask = mask_2_expand.sum(dim=1) # 有效的部分“长度”求和  #sum_mask:batch_size,hidden_size
                     sum_mask = torch.clamp(sum_mask, min=1e-9)
-                    bert_enc = torch.sum(bert_enc * mask_2_expand, dim=1) / sum_mask
+                    bert_enc = torch.sum(bert_enc * mask_2_expand, dim=1) / sum_mask # batch_size,hidden_size
                     #####
                 elif self.after_bert_choice == "last_cls":
                     bert_enc = pooled_out
@@ -178,17 +179,24 @@ class MyTextCNNModel(nn.Module):
             bert_enc = self.dropout(bert_enc)
             
             # textcnn
-            x = bert_enc.unsqueeze(1) # conv2d 需要接收 4维 的输入
-            x = [F.relu(conv(x)).squeeze(3) for conv in self.convs]
+            x = bert_enc.unsqueeze(1) # conv2d 需要接收 4维 的输入 (N, Ci=1, token_num, embed_dim)
+            x = [F.relu(conv(x)).squeeze(3) for conv in self.convs]  # [(N, Co, token_num) * len(kernel_sizes)]
             
             if self.pool_way == 'max':
-                x = [F.max_pool1d(item, item.size(2)).squeeze(2) for item in x]
+                x = [F.max_pool1d(item, item.size(2)).squeeze(2) for item in x]  # [(N, Co) * len(kernel_sizes)]
             elif self.pool_way == 'avg':
                 x = [F.avg_pool1d(item, item.size(2)).squeeze(2) for item in x]
         
-            x = torch.cat(x, 1)
-            x = self.dropout(x)
-            logits = self.fc(x)
+            x = torch.cat(x, 1) # (N, Co * len(kernel_sizes))
+
+        '''
+        x1 = self.conv_and_pool(x,self.conv13) #(N,Co)
+        x2 = self.conv_and_pool(x,self.conv14) #(N,Co)
+        x3 = self.conv_and_pool(x,self.conv15) #(N,Co)
+        x = torch.cat((x1, x2, x3), 1) # (N,len(Ks)*Co)
+        '''
+            x = self.dropout(x) # (N, Co * len(kernel_sizes))
+            logits = self.fc(x)  # (N, class_num)
             
             # 3.5 add label smoothing
             loss = self.label_smooth_loss(logits, labels.view(-1))
@@ -253,6 +261,17 @@ class MyRCNNModel(nn.Module):
             bert_enc, _ = self.bert(inputs, token_type_ids=input_types, attention_mask=bert_mask, output_all_encoded_layers=False) 
             bert_enc = self.dropout(bert_enc)
 
+            """
+            输入
+            – input (seq_len, batch, input_size)
+            – h_0 (num_layers * num_directions, batch, hidden_size)
+            – c_0 (num_layers * num_directions, batch, hidden_size)
+            输出
+            – output (seq_len, batch, num_directions * hidden_size)
+            – h_n (num_layers * num_directions, batch, hidden_size)
+            – c_n (num_layers * num_directions, batch, hidden_size)
+
+            """
             bert_enc = bert_enc.permute(1, 0, 2) # input.size() = (num_sequences, batch_size, embedding_length)
 
             h_0 = torch.zeros(2, bert_enc.size(1), self.hidden_size).to(device)
